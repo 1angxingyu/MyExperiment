@@ -1,0 +1,490 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>9个汉字序列记忆实验</title>
+
+  <!-- jsPsych 核心 & 插件 -->
+  <script src="https://unpkg.com/jspsych@7.3.4"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-preload@1.1.3"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css"
+        type="text/css" />
+
+  <!-- 读取 Excel 的库（SheetJS） -->
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    body {
+      background-color: #ffffff;
+      color: #000000;
+    }
+  </style>
+</head>
+<body></body>
+
+<script>
+  (async function() {
+
+    // ==============================
+    // 初始化 jsPsych
+    // ==============================
+    const jsPsych = initJsPsych({
+      on_finish: function() {
+        // 只导出 phase='response' 的 trial，也就是 WM 位置判断
+        const summary = jsPsych.data
+          .get()
+          .filter({ phase: 'response' })
+          .ignore('stimulus');
+
+        const csv = '\uFEFF' + summary.csv(); // 加 BOM 防止 Excel 乱码
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'char_memory_behavior.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    });
+
+    let timeline = [];
+
+    const N_TRIALS_PRACTICE = 5; // 练习 trial 数
+
+    // ★★★ 用于记录每个“逻辑 trial”的奇偶判断正确与否（0/1），key = wm_trial_index ★★★
+    const parityAccuracy = {};
+
+    // ==============================
+    // 工具函数：读取 Excel block
+    // ==============================
+    async function loadExcelBlock(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('无法读取文件: ' + url);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+      return json;  // 每一行是一个对象：{num, G1L1, ..., G3L3, position, target}
+    }
+
+    // 将一个 block 按 position 分组，每个 position 抽 8 行，得到 72 个 trial
+    function selectTrialsPerBlock(rows, originalBlockName) {
+      const byPos = {};
+      for (let pos = 1; pos <= 9; pos++) {
+        byPos[pos] = [];
+      }
+
+      rows.forEach(row => {
+        const pos = Number(row['position'] || row['Position'] || row['POS'] || row['pos']);
+        if (byPos[pos]) {
+          byPos[pos].push(row);
+        }
+      });
+
+      let selected = [];
+      for (let pos = 1; pos <= 9; pos++) {
+        const list = byPos[pos];
+        if (!list || list.length < 8) {
+          console.warn(
+            originalBlockName + ' 中 position=' + pos + ' 的行数少于 8 条。实际行数：' + (list ? list.length : 0)
+          );
+        }
+        const shuffled = jsPsych.randomization.shuffle(list);
+        const chosen = shuffled.slice(0, 8);  // 即使不足 8 条，也会全部选
+        chosen.forEach(row => {
+          selected.push({
+            original_block: originalBlockName,
+            num: row['num'],
+            position: Number(row['position']),
+            target: row['target'],
+            chars: [
+              row['G1L1'], row['G1L2'], row['G1L3'],
+              row['G2L1'], row['G2L2'], row['G2L3'],
+              row['G3L1'], row['G3L2'], row['G3L3']
+            ]
+          });
+        });
+      }
+
+      // 打乱这个 block 内 72 个 trial 的顺序
+      selected = jsPsych.randomization.shuffle(selected);
+      return selected;
+    }
+
+    // ==============================
+    // 通用 trial 组件
+    // ==============================
+    const fixation_500 = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '<div style="font-size: 48px;">+</div>',
+      choices: 'NO_KEYS',
+      trial_duration: 500
+    };
+
+    const fixation_1000 = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '<div style="font-size: 48px;">+</div>',
+      choices: 'NO_KEYS',
+      trial_duration: 1000
+    };
+
+    const iti_blank = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '',
+      choices: 'NO_KEYS',
+      trial_duration: function() {
+        return jsPsych.randomization.randomInt(500, 800);
+      }
+    };
+
+    function makeBlockBreak(orderIndex) {
+      return {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+          <p style="font-size: 24px; line-height: 1.6;">
+            您已经完成第 ${orderIndex} 段正式实验（共 3 段），可以稍作休息。<br><br>
+            当您准备好继续时，请按空格键开始下一段。
+          </p>
+        `,
+        choices: [' '],
+        data: {
+          phase: 'block_break',
+          block_order: orderIndex
+        }
+      };
+    }
+
+    const welcome = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          欢迎参加实验！<br><br>
+          在每个试次中，您会看到 <strong>9 个汉字</strong> 依次呈现。<br>
+          每个汉字呈现 <strong>0.1 秒</strong>，其后会有 <strong>0.15 秒</strong> 的空屏，然后出现下一个汉字。<br>
+          你需要努力记住它们的出现顺序<br><br>
+          9 个汉字呈现完毕后，会有一个保持阶段：<br>
+          先呈现 1 秒十字注视，然后出现一个 <strong>奇偶判断任务</strong>（数字 11–20），<br>
+          您需要判断该数字是奇数还是偶数：<br>
+          <strong>F 键 = 奇数，J 键 = 偶数</strong>。<br>
+          做出判断后，再出现 1 秒的十字注视。<br><br>
+          随后会呈现一个汉字，您的任务是判断这个汉字在刚才的 9 个汉字序列中是第几个出现的，<br>
+          请按键盘数字 <strong>1–9</strong> 作答。<br><br>
+          首先会有 <strong>5 个练习试次</strong>，然后进入正式实验。<br><br>
+          按空格键开始练习。
+        </p>
+      `,
+      choices: [' ']
+    };
+
+    const practice_end = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          练习结束！<br><br>
+          接下来将进入 <strong>正式实验</strong>。<br>
+          正式实验包含 <strong>3 个区块</strong>，每个区块 <strong>72 个试次</strong>，共 216 个试次，<br>
+          区块之间可以休息。<br><br>
+          请保持专注，尽量准确、快速作答。<br><br>
+          当您准备好开始正式实验时，请按空格键。
+        </p>
+      `,
+      choices: [' ']
+    };
+
+    const end_screen = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          实验结束，感谢您的参与！<br><br>
+          行为数据文件 <strong>char_memory_behavior.csv</strong> 将自动下载。
+        </p>
+      `,
+      choices: 'NO_KEYS',
+      trial_duration: 3000
+    };
+
+    // ==============================
+    // 添加一个完整的文字 trial
+    // ==============================
+    function addWordTrial(trialData, blockLabel, isPractice, wmTrialIndex) {
+
+      const seqChars = trialData.chars;        // 9 个汉字序列
+      const correctPos = trialData.position;   // 正确位置（1–9）
+      const targetChar = trialData.target;     // 目标汉字
+
+      // 1. 开始注视 500 ms
+      const fix1 = Object.assign({}, fixation_500, {
+        data: {
+          phase: 'fixation_start',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice
+        }
+      });
+      timeline.push(fix1);
+
+      // 2. 9 个汉字序列：每个 100 ms + 150 ms 空屏
+      for (let i = 0; i < seqChars.length; i++) {
+        const ch = seqChars[i];
+
+        // 汉字呈现 100ms
+        timeline.push({
+          type: jsPsychHtmlKeyboardResponse,
+          stimulus: `<div style="font-size: 60px;">${ch}</div>`,
+          choices: 'NO_KEYS',
+          trial_duration: 100,
+          data: {
+            phase: 'sequence_char',
+            wm_trial_index: wmTrialIndex,
+            block_label: blockLabel,
+            original_block: trialData.original_block,
+            is_practice: isPractice,
+            char_index: i + 1,
+            char: ch
+          }
+        });
+
+        // 空屏 150ms
+        timeline.push({
+          type: jsPsychHtmlKeyboardResponse,
+          stimulus: '',
+          choices: 'NO_KEYS',
+          trial_duration: 150,
+          data: {
+            phase: 'sequence_blank',
+            wm_trial_index: wmTrialIndex,
+            block_label: blockLabel,
+            original_block: trialData.original_block,
+            is_practice: isPractice,
+            char_index: i + 1
+          }
+        });
+      }
+
+      // 3. 第一段 1 s 注视（保持期的一部分）
+      const fix2 = Object.assign({}, fixation_1000, {
+        data: {
+          phase: 'retention_fixation_1',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice
+        }
+      });
+      timeline.push(fix2);
+
+      // 4. 奇偶判断任务：11–20 随机，F=奇数，J=偶数
+      const number = jsPsych.randomization.randomInt(11, 20);
+      const isOdd = number % 2 === 1;
+      const correctParityKey = isOdd ? 'f' : 'j';
+
+      timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+          <p style="font-size: 24px; line-height: 1.8;">
+            请判断下面数字是奇数还是偶数：<br><br>
+            <span style="font-size: 60px;">${number}</span><br><br>
+            <strong>F 键 = 奇数</strong>，<strong>J 键 = 偶数</strong>。
+          </p>
+        `,
+        choices: ['f', 'j'],
+        trial_duration: 3000,
+        response_ends_trial: true,
+        data: {
+          phase: 'parity',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice,
+          parity_number: number,
+          parity_correct_key: correctParityKey
+        },
+        on_finish: function(data) {
+          data.correct = (data.response === data.parity_correct_key);
+          data.acc = data.correct ? 1 : 0;
+
+          // ★ 用 wm_trial_index 记录奇偶任务正确与否 ★
+          parityAccuracy[data.wm_trial_index] = data.acc;  // 1=正确,0=错误
+        }
+      });
+
+      // 5. 第二段 1 s 注视（保持期的后半段）
+      const fix3 = Object.assign({}, fixation_1000, {
+        data: {
+          phase: 'retention_fixation_2',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice
+        }
+      });
+      timeline.push(fix3);
+
+      // 6. 目标汉字呈现 500 ms（不响应）
+      timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `<div style="font-size: 60px;">${targetChar}</div>`,
+        choices: 'NO_KEYS',
+        trial_duration: 500,
+        data: {
+          phase: 'target',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice,
+          target_char: targetChar,
+          target_position: correctPos,
+          sequence_chars: seqChars.join('')
+        }
+      });
+
+      // 7. 位置判断：1–9 键（phase = 'response'，用于导出）
+      timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+          <p style="font-size: 24px; line-height: 1.6;">
+            刚刚呈现的汉字：<br><br>
+            在刚才的 9 个汉字序列中是第几个出现的？<br><br>
+            请按键盘数字 <strong>1–9</strong> 进行作答。
+          </p>
+        `,
+        choices: ['1','2','3','4','5','6','7','8','9'],
+        data: {
+          phase: 'response',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice,
+          target_char: targetChar,
+          target_position: correctPos,
+          sequence_chars: seqChars.join(''),
+          correct_response: String(correctPos)
+        },
+        on_finish: function(data) {
+          data.correct = (data.response === data.correct_response);
+          data.acc = data.correct ? 1 : 0;
+
+          // ★ 从 parityAccuracy 中拿到对应奇偶正确与否，写进这一行 ★
+          if (typeof parityAccuracy[data.wm_trial_index] !== 'undefined') {
+            data.parity_correct = parityAccuracy[data.wm_trial_index]; // 1=奇偶正确,0=错误
+          } else {
+            data.parity_correct = null;
+          }
+        }
+      });
+
+      // 8. ITI 空屏 500–800 ms
+      const iti = Object.assign({}, iti_blank, {
+        data: {
+          phase: 'iti',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          original_block: trialData.original_block,
+          is_practice: isPractice
+        }
+      });
+      timeline.push(iti);
+    }
+
+    // ==============================
+    // 自动备份：beforeunload 导出位置判断数据
+    // ==============================
+    window.addEventListener('beforeunload', function(e) {
+      try {
+        const summary = jsPsych.data
+          .get()
+          .filter({ phase: 'response' })
+          .ignore('stimulus');
+
+        if (summary.count() === 0) return;
+
+        const csv = '\uFEFF' + summary.csv();
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'char_memory_behavior_autosave.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {
+        console.error('自动备份失败：', err);
+      }
+    });
+
+    // ==============================
+    // 读取三个 block 并构建时间线
+    // ==============================
+    // 假设 block1.xlsx, block2.xlsx, block3.xlsx 与本 html 在同一目录
+    const [block1Rows, block2Rows, block3Rows] = await Promise.all([
+      loadExcelBlock('block1.xlsx'),
+      loadExcelBlock('block2.xlsx'),
+      loadExcelBlock('block3.xlsx')
+    ]);
+
+    const block1Trials = selectTrialsPerBlock(block1Rows, 'block1');
+    const block2Trials = selectTrialsPerBlock(block2Rows, 'block2');
+    const block3Trials = selectTrialsPerBlock(block3Rows, 'block3');
+
+    let blocks = [
+      { label: 'block1', original_block: 'block1', trials: block1Trials },
+      { label: 'block2', original_block: 'block2', trials: block2Trials },
+      { label: 'block3', original_block: 'block3', trials: block3Trials }
+    ];
+
+    // 随机化 block 顺序
+    blocks = jsPsych.randomization.shuffle(blocks);
+
+    // 练习 trial：从所有 block trial 中随机抽 5 个（可以和正式实验重复）
+    const allTrialsForPractice = block1Trials.concat(block2Trials, block3Trials);
+    const practiceTrials = jsPsych.randomization.sampleWithoutReplacement(
+      allTrialsForPractice,
+      N_TRIALS_PRACTICE
+    );
+
+    let globalTrialIndex = 0;  // 逻辑 trial 编号（1,2,3,...）
+
+    // 欢迎
+    timeline.push(welcome);
+
+    // 练习
+    practiceTrials.forEach(t => {
+      globalTrialIndex++;
+      addWordTrial(t, 'practice', true, globalTrialIndex);
+    });
+
+    // 练习结束提示
+    timeline.push(practice_end);
+
+    // 正式实验：3 个 block，顺序已随机化
+    blocks.forEach((block, idx) => {
+      block.trials.forEach(t => {
+        globalTrialIndex++;
+        addWordTrial(t, block.label, false, globalTrialIndex);
+      });
+
+      // block 间休息（最后一个 block 后不用休息）
+      if (idx < blocks.length - 1) {
+        timeline.push(makeBlockBreak(idx + 1));
+      }
+    });
+
+    // 结束提示
+    timeline.push(end_screen);
+
+    // 启动实验
+    jsPsych.run(timeline);
+
+  })();
+</script>
+</html>
