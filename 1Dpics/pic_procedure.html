@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>9个形状序列记忆实验</title>
+
+  <script src="https://unpkg.com/jspsych@7.3.4"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-preload@1.1.3"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-image-keyboard-response@1.1.3"></script>
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css"
+        type="text/css" />
+
+  <style>
+    body {
+      background-color: #ffffff;
+      color: #000000;
+    }
+  </style>
+</head>
+<body></body>
+
+<script>
+  // ==============================
+  // 基本设置
+  // ==============================
+  const IMG_PATH = 'img/';  // 图片文件夹
+
+  const SHAPES = [
+    'circle',
+    'flag',
+    'heart',
+    'hexagon',
+    'quatrefoil',
+    'semicircle',
+    'square',
+    'star',
+    'triangle'
+  ];
+
+  const COLORS = ['red', 'yellow', 'blue'];
+
+  const N_POSITIONS = 9;
+  const REPEATS_PER_POS = 24;
+  const N_TRIALS_MAIN = N_POSITIONS * REPEATS_PER_POS; // 216
+
+  // ★ 两次休息：完成 72 个、144 个正式 trial 后休息
+  const BREAK_POINTS = [72, 144];
+
+  const N_TRIALS_PRACTICE = 5;
+
+  let response_trial_count_main = 0;
+
+  // ==============================
+  // 初始化 jsPsych
+  // ==============================
+  const jsPsych = initJsPsych({
+    on_finish: function() {
+      // 结束时：只导出 phase='response' 的 trial（每 trial 一行），并去掉 stimulus 列
+      const summary = jsPsych.data
+        .get()
+        .filter({ phase: 'response' })
+        .ignore('stimulus');
+
+      const csv = '\uFEFF' + summary.csv(); // 加 BOM 防止 Excel 乱码
+
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'shape_memory_behavior.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    }
+  });
+
+  let timeline = [];
+
+  // ==============================
+  // 预加载图片
+  // ==============================
+  let image_files = [];
+  SHAPES.forEach(function(shape) {
+    COLORS.forEach(function(color) {
+      image_files.push(IMG_PATH + shape + '_' + color + '.png');
+    });
+    image_files.push(IMG_PATH + shape + '_outline.png');
+  });
+
+  const preload = {
+    type: jsPsychPreload,
+    images: image_files
+  };
+  timeline.push(preload);
+
+  // ==============================
+  // 欢迎与说明
+  // ==============================
+  const welcome = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+      <p style="font-size: 24px; line-height: 1.6;">
+        欢迎参加实验！<br><br>
+        在每个试次中，您会看到 9 个 **同一种颜色** 的彩色图形依次呈现。<br>
+        （颜色可能是红色、黄色或蓝色中的一种）。<br>
+        随后会出现一个十字注视，然后呈现其中一个图形的无色版本（轮廓图）。<br>
+        您的任务是判断这个无色版本的图形在刚才的 9 个图形中是第几个出现的，按键盘 1–9 作答。<br><br>
+        首先会有 <strong>5 个练习试次</strong>，练习之后进入正式实验。<br><br>
+        请尽量准确、快速地作答。<br><br>
+        按空格键开始练习。
+      </p>
+    `,
+    choices: [' ']
+  };
+  timeline.push(welcome);
+
+  // ==============================
+  // 1. 生成 probe 位置序列 (平衡位置)
+  // ==============================
+  let probe_positions_main = [];
+  for (let pos = 1; pos <= N_POSITIONS; pos++) {
+    for (let r = 0; r < REPEATS_PER_POS; r++) {
+      probe_positions_main.push(pos);
+    }
+  }
+  // 打乱位置序列
+  probe_positions_main = jsPsych.randomization.shuffle(probe_positions_main);
+
+  let probe_positions_practice = [];
+  for (let i = 0; i < N_TRIALS_PRACTICE; i++) {
+    probe_positions_practice.push(jsPsych.randomization.randomInt(1, 9));
+  }
+
+  // ==============================
+  // 2. 生成颜色序列 (平衡颜色)
+  // ==============================
+  // 216 total / 3 colors = 72 trials per color
+  let trial_colors_main = [];
+  const TRIALS_PER_COLOR = N_TRIALS_MAIN / 3; 
+
+  for (let i = 0; i < TRIALS_PER_COLOR; i++) {
+    COLORS.forEach(c => {
+        trial_colors_main.push(c);
+    });
+  }
+  // 打乱颜色序列
+  trial_colors_main = jsPsych.randomization.shuffle(trial_colors_main);
+
+  // ==============================
+  // 生成一个 trial 的 9 张图形序列 (修改为单色)
+  // ==============================
+  function generate_sequence(target_color) {
+    // 随机打乱9个形状
+    let shuffled = jsPsych.randomization.shuffle(SHAPES.slice());
+    
+    let sequence = [];
+    // 将打乱后的9个形状全部赋予当前 trial 的目标颜色
+    shuffled.forEach(s => {
+        sequence.push({shape: s, color: target_color});
+    });
+    
+    return sequence;
+  }
+
+  // ==============================
+  // 通用组件：注视点、空屏、休息
+  // ==============================
+  const fixation_500 = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: '<div style="font-size: 48px;">+</div>',
+    choices: 'NO_KEYS',
+    trial_duration: 500
+  };
+
+  const fixation_2000 = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: '<div style="font-size: 48px;">+</div>',
+    choices: 'NO_KEYS',
+    trial_duration: 2000
+  };
+
+  const iti_blank = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: '',
+    choices: 'NO_KEYS',
+    trial_duration: function() {
+      return jsPsych.randomization.randomInt(500, 800);
+    }
+  };
+
+  const break_trial = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+      <p style="font-size: 24px; line-height: 1.6;">
+        您已经完成了一部分正式试次，可以稍作休息。<br><br>
+        当您准备好继续时，请按空格键。
+      </p>
+    `,
+    choices: [' ']
+  };
+
+  const practice_end = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+      <p style="font-size: 24px; line-height: 1.6;">
+        练习结束！<br><br>
+        接下来将进入 <strong>正式实验</strong>，共 216 个试次，中间会有<strong>两次休息</strong>。<br><br>
+        请保持专注，尽量准确、快速作答。<br><br>
+        当您准备好开始正式实验时，请按空格键。
+      </p>
+    `,
+    choices: [' ']
+  };
+
+  // ==============================
+  // 添加一个完整 trial（练习 / 正式）
+  // ==============================
+  // 新增 assigned_color 参数
+  function add_one_trial(trial_index, block_type, probe_pos, check_break_for_main, assigned_color) {
+    
+    // 生成当前 trial 的图片序列（全为 assigned_color）
+    const sequence = generate_sequence(assigned_color);
+
+    // 把 9 张图片的文件名串成一列字符串，保存到行为 trial 里
+    const sequence_files = sequence
+      .map(s => IMG_PATH + s.shape + '_' + s.color + '.png')
+      .join(';');
+
+    const probe_shape = sequence[probe_pos - 1].shape;
+    const correct_key = String(probe_pos);
+
+    // ★ 正式实验：在完成 72、144 个 main trial 后插入休息
+    if (
+      block_type === 'main' &&
+      check_break_for_main &&
+      BREAK_POINTS.includes(response_trial_count_main)
+    ) {
+      timeline.push(break_trial);
+    }
+
+    // 1. 0.5 s 注视
+    let fix1 = Object.assign({}, fixation_500, {
+      data: {
+        phase: 'fixation_500',
+        trial_num: trial_index,
+        block_type: block_type
+      }
+    });
+    timeline.push(fix1);
+
+    // 2. 9 张彩色图形
+    for (let pos = 0; pos < N_POSITIONS; pos++) {
+      const stim_info = sequence[pos];
+      const file = IMG_PATH + stim_info.shape + '_' + stim_info.color + '.png';
+
+      let seq_trial = {
+        type: jsPsychImageKeyboardResponse,
+        stimulus: file,
+        choices: 'NO_KEYS',
+        trial_duration: 500,
+        data: {
+          phase: 'sequence',
+          trial_num: trial_index,
+          seq_position: pos + 1,
+          shape: stim_info.shape,
+          color: stim_info.color,  // 这里记录当前形状的颜色
+          block_type: block_type,
+          trial_color_condition: assigned_color // 额外记录该 trial 所属的颜色条件
+        }
+      };
+      timeline.push(seq_trial);
+    }
+
+    // 3. 2 s 注视
+    let fix2 = Object.assign({}, fixation_2000, {
+      data: {
+        phase: 'fixation_2000',
+        trial_num: trial_index,
+        block_type: block_type
+      }
+    });
+    timeline.push(fix2);
+
+    // 4. 0.5 s outline 图形
+    const outline_file = IMG_PATH + probe_shape + '_outline.png';
+    let outline_trial = {
+      type: jsPsychImageKeyboardResponse,
+      stimulus: outline_file,
+      choices: 'NO_KEYS',
+      trial_duration: 500,
+      data: {
+        phase: 'outline',
+        trial_num: trial_index,
+        probe_position: probe_pos,
+        probe_shape: probe_shape,
+        block_type: block_type
+      }
+    };
+    timeline.push(outline_trial);
+
+    // 5. 问题 & 键盘作答（这里挂上 sequence_files）
+    let question_trial = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          刚刚的图形是在序列中第几个出现的？<br><br>
+          请按键盘数字 <strong>1–9</strong> 进行作答。
+        </p>
+      `,
+      choices: ['1','2','3','4','5','6','7','8','9'],
+      data: {
+        phase: 'response',
+        trial_num: trial_index,
+        probe_position: probe_pos,
+        probe_shape: probe_shape,
+        correct_response: correct_key,
+        block_type: block_type,
+        sequence_files: sequence_files,
+        trial_color_condition: assigned_color // 在 response 这一行也记录颜色条件，方便分析
+      },
+      on_finish: function(data) {
+        data.correct = (data.response === data.correct_response);
+      }
+    };
+    timeline.push(question_trial);
+
+    // 6. 随机空屏
+    let iti = Object.assign({}, iti_blank, {
+      data: {
+        phase: 'iti',
+        trial_num: trial_index,
+        block_type: block_type
+      }
+    });
+    timeline.push(iti);
+
+    if (block_type === 'main') {
+      response_trial_count_main += 1;
+    }
+  }
+
+  // ==============================
+  // 添加 5 个练习 trial
+  // ==============================
+  for (let i = 0; i < N_TRIALS_PRACTICE; i++) {
+    const trial_index = i + 1;
+    const probe_pos = probe_positions_practice[i];
+    // 练习时随机取一个颜色
+    const rand_color = jsPsych.randomization.sampleWithoutReplacement(COLORS, 1)[0];
+    add_one_trial(trial_index, 'practice', probe_pos, false, rand_color);
+  }
+
+  timeline.push(practice_end);
+
+  // ==============================
+  // 添加 216 个正式 trial
+  // ==============================
+  for (let i = 0; i < N_TRIALS_MAIN; i++) {
+    const trial_index = i + 1;
+    const probe_pos = probe_positions_main[i];
+    // 从平衡的颜色序列中取值
+    const assigned_color = trial_colors_main[i];
+    
+    add_one_trial(trial_index, 'main', probe_pos, true, assigned_color);
+  }
+
+  // ==============================
+  // 结束提示
+  // ==============================
+  const end_screen = {
+    type: jsPsychHtmlKeyboardResponse,
+    stimulus: `
+      <p style="font-size: 24px; line-height: 1.6;">
+        实验结束，感谢您的参与！<br><br>
+        行为数据文件 <strong>shape_memory_behavior.csv</strong> 将自动下载。<br>
+        如遇意外关闭，浏览器也会尝试下载已完成部分的行为数据备份。
+      </p>
+    `,
+    choices: "NO_KEYS",
+    trial_duration: 3000
+  };
+  timeline.push(end_screen);
+
+  // ==============================
+  // 自动备份：beforeunload 时导出 phase='response' 数据（忽略 stimulus）
+  // ==============================
+  window.addEventListener('beforeunload', function(e) {
+    try {
+      const summary = jsPsych.data
+        .get()
+        .filter({ phase: 'response' })
+        .ignore('stimulus');
+
+      if (summary.count() === 0) return;
+
+      const csv = '\uFEFF' + summary.csv();
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'shape_memory_behavior_autosave.csv';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      console.error('自动备份失败：', err);
+    }
+  });
+
+  // ==============================
+  // 启动实验
+  // ==============================
+  jsPsych.run(timeline);
+</script>
+</html>
