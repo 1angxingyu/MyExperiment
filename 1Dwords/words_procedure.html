@@ -1,0 +1,417 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>9个汉字序列记忆实验（无干扰任务版）</title>
+
+  <script src="https://unpkg.com/jspsych@7.3.4"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-preload@1.1.3"></script>
+  <script src="https://unpkg.com/@jspsych/plugin-html-keyboard-response@1.1.3"></script>
+
+  <link rel="stylesheet"
+        href="https://unpkg.com/jspsych@7.3.4/css/jspsych.css"
+        type="text/css" />
+
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <style>
+    body {
+      background-color: #ffffff;
+      color: #000000;
+    }
+  </style>
+</head>
+<body></body>
+
+<script>
+  (async function() {
+
+    // ==============================
+    // 初始化 jsPsych
+    // ==============================
+    const jsPsych = initJsPsych({
+      on_finish: function() {
+        const summary = jsPsych.data
+          .get()
+          .filter({ phase: 'response' })
+          .ignore('stimulus');
+
+        const csv = '\uFEFF' + summary.csv();
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'char_memory_behavior.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }
+    });
+
+    let timeline = [];
+    const N_TRIALS_PRACTICE = 5; 
+    
+    // [已删除] parityAccuracy 变量
+
+    // ==============================
+    // 工具函数：读取 Excel block
+    // ==============================
+    async function loadExcelBlock(url) {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error('无法读取文件: ' + url);
+      }
+      const arrayBuffer = await response.arrayBuffer();
+      const workbook = XLSX.read(arrayBuffer, { type: 'array' });
+      const sheetName = workbook.SheetNames[0];
+      const sheet = workbook.Sheets[sheetName];
+      const json = XLSX.utils.sheet_to_json(sheet, { defval: '' });
+      return json;
+    }
+
+    // ==============================
+    // 核心逻辑：限制性随机洗牌 (保持不变)
+    // ==============================
+    function getConstrainedShuffle(originalArr) {
+      // 1. 记录所有禁止的邻接对 (例如 "A||B")
+      const bannedPairs = new Set();
+      for (let i = 0; i < originalArr.length - 1; i++) {
+        bannedPairs.add(originalArr[i] + '||' + originalArr[i+1]);
+      }
+
+      let shuffledArr = [];
+      let isValid = false;
+      let attempt = 0;
+      const MAX_ATTEMPTS = 10000;
+
+      while (!isValid && attempt < MAX_ATTEMPTS) {
+        attempt++;
+        shuffledArr = jsPsych.randomization.shuffle([...originalArr]);
+        isValid = true;
+
+        for (let i = 0; i < shuffledArr.length - 1; i++) {
+          const pair = shuffledArr[i] + '||' + shuffledArr[i+1];
+          if (bannedPairs.has(pair)) {
+            isValid = false;
+            break;
+          }
+        }
+      }
+
+      if (!isValid) {
+        console.warn("未能生成满足限制的随机序列，使用了最后一次生成的序列。");
+      }
+      return shuffledArr;
+    }
+
+    // ==============================
+    // 数据处理：选择 Trial 并应用随机化 (保持不变)
+    // ==============================
+    function selectTrialsPerBlock(rows, originalBlockName) {
+      const byPos = {};
+      for (let pos = 1; pos <= 9; pos++) {
+        byPos[pos] = [];
+      }
+
+      rows.forEach(row => {
+        const pos = Number(row['position'] || row['Position'] || row['POS'] || row['pos']);
+        if (byPos[pos]) {
+          byPos[pos].push(row);
+        }
+      });
+
+      let selected = [];
+      for (let pos = 1; pos <= 9; pos++) {
+        const list = byPos[pos];
+        if (!list || list.length < 8) {
+          console.warn(originalBlockName + ' position=' + pos + ' 少于8条');
+        }
+        
+        const shuffled = jsPsych.randomization.shuffle(list);
+        const chosen = shuffled.slice(0, 8);
+
+        chosen.forEach(row => {
+          // 1. 获取原始 9 字序列
+          const originalChars = [
+            row['G1L1'], row['G1L2'], row['G1L3'],
+            row['G2L1'], row['G2L2'], row['G2L3'],
+            row['G3L1'], row['G3L2'], row['G3L3']
+          ];
+          
+          // 2. 生成符合要求的新随机序列
+          const newChars = getConstrainedShuffle(originalChars);
+
+          // 3. 确定要测的位置（来自 Excel IV）
+          const testPos = Number(row['position']); 
+
+          // 4. 根据位置，从新序列中提取新的目标字
+          const newTargetChar = newChars[testPos - 1];
+
+          selected.push({
+            original_block: originalBlockName,
+            num: row['num'],
+            position: testPos,
+            target: newTargetChar,
+            chars: newChars
+          });
+        });
+      }
+
+      selected = jsPsych.randomization.shuffle(selected);
+      return selected;
+    }
+
+    // ==============================
+    // 刺激素材定义
+    // ==============================
+    const fixation_500 = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '<div style="font-size: 48px;">+</div>',
+      choices: 'NO_KEYS',
+      trial_duration: 500
+    };
+
+    const fixation_1000 = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '<div style="font-size: 48px;">+</div>',
+      choices: 'NO_KEYS',
+      trial_duration: 2000
+    };
+
+    const iti_blank = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: '',
+      choices: 'NO_KEYS',
+      trial_duration: function() {
+        return jsPsych.randomization.randomInt(500, 800);
+      }
+    };
+
+    function makeBlockBreak(orderIndex) {
+      return {
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+          <p style="font-size: 24px; line-height: 1.6;">
+            您已经完成第 ${orderIndex} 段正式实验（共 3 段），可以稍作休息。<br><br>
+            当您准备好继续时，请按空格键开始下一段。
+          </p>
+        `,
+        choices: [' '],
+        data: { phase: 'block_break', block_order: orderIndex }
+      };
+    }
+
+    // ★★★ 修改后的欢迎语 (删除了奇偶判断部分) ★★★
+    const welcome = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          欢迎参加实验！<br><br>
+          在每个试次中，您会看到 <strong>9 个汉字</strong> 依次呈现。<br>
+          每个汉字呈现 <strong>0.1 秒</strong>，其后会有 <strong>0.15 秒</strong> 的空屏，然后出现下一个汉字。<br>
+          你需要努力记住它们的出现顺序。<br><br>
+          9 个汉字呈现完毕后，会有短暂的 <strong>十字注视</strong> 保持阶段。<br><br>
+          随后会呈现一个汉字，您的任务是判断这个汉字在刚才的 9 个汉字序列中是第几个出现的，<br>
+          请按键盘数字 <strong>1–9</strong> 作答。<br><br>
+          首先会有 <strong>5 个练习试次</strong>，然后进入正式实验。<br><br>
+          按空格键开始练习。
+        </p>
+      `,
+      choices: [' ']
+    };
+
+    const practice_end = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          练习结束！<br><br>
+          接下来将进入 <strong>正式实验</strong>。<br>
+          正式实验包含 <strong>3 个区块</strong>，每个区块 <strong>72 个试次</strong>，共 216 个试次，<br>
+          区块之间可以休息。<br><br>
+          请保持专注，尽量准确、快速作答。<br><br>
+          当您准备好开始正式实验时，请按空格键。
+        </p>
+      `,
+      choices: [' ']
+    };
+
+    const end_screen = {
+      type: jsPsychHtmlKeyboardResponse,
+      stimulus: `
+        <p style="font-size: 24px; line-height: 1.6;">
+          实验结束，感谢您的参与！<br><br>
+          行为数据文件 <strong>char_memory_behavior.csv</strong> 将自动下载。
+        </p>
+      `,
+      choices: 'NO_KEYS',
+      trial_duration: 3000
+    };
+
+    // ==============================
+    // Trial 构造函数
+    // ==============================
+    function addWordTrial(trialData, blockLabel, isPractice, wmTrialIndex) {
+      const seqChars = trialData.chars;
+      const correctPos = trialData.position;
+      const targetChar = trialData.target;
+
+      // 1. 注视点
+      timeline.push(Object.assign({}, fixation_500, {
+        data: { phase: 'fixation_start', wm_trial_index: wmTrialIndex, block_label: blockLabel, is_practice: isPractice }
+      }));
+
+      // 2. 序列呈现
+      for (let i = 0; i < seqChars.length; i++) {
+        timeline.push({
+          type: jsPsychHtmlKeyboardResponse,
+          stimulus: `<div style="font-size: 60px;">${seqChars[i]}</div>`,
+          choices: 'NO_KEYS',
+          trial_duration: 100,
+          data: {
+            phase: 'sequence_char',
+            wm_trial_index: wmTrialIndex,
+            block_label: blockLabel,
+            is_practice: isPractice,
+            char_index: i + 1,
+            char: seqChars[i]
+          }
+        });
+        timeline.push({
+          type: jsPsychHtmlKeyboardResponse,
+          stimulus: '',
+          choices: 'NO_KEYS',
+          trial_duration: 150,
+          data: { phase: 'sequence_blank' }
+        });
+      }
+
+      // 3. 保持期 (2秒注视，代替了原先的 Task 阶段)
+      timeline.push(Object.assign({}, fixation_1000, {
+        data: { phase: 'retention_fixation' }
+      }));
+
+
+      // 4. 目标呈现
+      timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `<div style="font-size: 60px;">${targetChar}</div>`,
+        choices: 'NO_KEYS',
+        trial_duration: 500,
+        data: {
+          phase: 'target',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          is_practice: isPractice,
+          target_char: targetChar,
+          target_position: correctPos,
+          sequence_chars: seqChars.join('')
+        }
+      });
+
+      // 5. 反应
+      timeline.push({
+        type: jsPsychHtmlKeyboardResponse,
+        stimulus: `
+          <p style="font-size: 24px; line-height: 1.6;">
+            刚刚呈现的汉字：<br><br>
+            在刚才的 9 个汉字序列中是第几个出现的？<br><br>
+            请按键盘数字 <strong>1–9</strong> 进行作答。
+          </p>
+        `,
+        choices: ['1','2','3','4','5','6','7','8','9'],
+        data: {
+          phase: 'response',
+          wm_trial_index: wmTrialIndex,
+          block_label: blockLabel,
+          is_practice: isPractice,
+          target_char: targetChar,
+          target_position: correctPos,
+          sequence_chars: seqChars.join(''),
+          correct_response: String(correctPos)
+        },
+        on_finish: function(data) {
+          data.correct = (data.response === data.correct_response);
+          data.acc = data.correct ? 1 : 0;
+          // [已删除] parity_correct 记录
+        }
+      });
+
+      // 6. ITI
+      timeline.push(Object.assign({}, iti_blank, {
+        data: { phase: 'iti' }
+      }));
+    }
+
+    // ==============================
+    // 自动备份
+    // ==============================
+    window.addEventListener('beforeunload', function(e) {
+      try {
+        const summary = jsPsych.data.get().filter({ phase: 'response' }).ignore('stimulus');
+        if (summary.count() === 0) return;
+        const csv = '\uFEFF' + summary.csv();
+        const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = 'char_memory_autosave.csv';
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      } catch (err) {}
+    });
+
+    // ==============================
+    // 执行
+    // ==============================
+    const [block1Rows, block2Rows, block3Rows] = await Promise.all([
+      loadExcelBlock('block1.xlsx'),
+      loadExcelBlock('block2.xlsx'),
+      loadExcelBlock('block3.xlsx')
+    ]);
+
+    const block1Trials = selectTrialsPerBlock(block1Rows, 'block1');
+    const block2Trials = selectTrialsPerBlock(block2Rows, 'block2');
+    const block3Trials = selectTrialsPerBlock(block3Rows, 'block3');
+
+    let blocks = [
+      { label: 'block1', trials: block1Trials },
+      { label: 'block2', trials: block2Trials },
+      { label: 'block3', trials: block3Trials }
+    ];
+
+    blocks = jsPsych.randomization.shuffle(blocks);
+
+    const allTrialsForPractice = block1Trials.concat(block2Trials, block3Trials);
+    const practiceTrials = jsPsych.randomization.sampleWithoutReplacement(allTrialsForPractice, N_TRIALS_PRACTICE);
+
+    let globalTrialIndex = 0;
+
+    timeline.push(welcome);
+
+    practiceTrials.forEach(t => {
+      globalTrialIndex++;
+      addWordTrial(t, 'practice', true, globalTrialIndex);
+    });
+
+    timeline.push(practice_end);
+
+    blocks.forEach((block, idx) => {
+      block.trials.forEach(t => {
+        globalTrialIndex++;
+        addWordTrial(t, block.label, false, globalTrialIndex);
+      });
+      if (idx < blocks.length - 1) {
+        timeline.push(makeBlockBreak(idx + 1));
+      }
+    });
+
+    timeline.push(end_screen);
+
+    jsPsych.run(timeline);
+
+  })();
+</script>
+</html>
